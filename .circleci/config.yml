@@ -1,42 +1,106 @@
-# Java Gradle CircleCI 2.0 configuration file
-#
-# Check https://circleci.com/docs/2.0/language-java/ for more details
-#
-version: 2
+version: 2.1
 jobs:
-  build:
+  run_tests:
     docker:
-      # specify the version you desire here
-      - image: circleci/openjdk:8-jdk
-
-      # Specify service dependencies here if necessary
-      # CircleCI maintains a library of pre-built images
-      # documented at https://circleci.com/docs/2.0/circleci-images/
-      # - image: circleci/postgres:9.4
-
-    working_directory: ~/repo
-
-    environment:
-      # Customize the JVM maximum heap limit
-      JVM_OPTS: -Xmx3200m
-      TERM: dumb
-
+      - image: circleci/node:12
     steps:
       - checkout
-
-      # Download and cache dependencies
-      - restore_cache:
-          keys:
-            - v1-dependencies-{{ checksum "build.gradle" }}
-            # fallback to using the latest cache if no exact match is found
-            - v1-dependencies-
-
-      - run: gradle dependencies
-
-      - save_cache:
+      - run:
+          name: Install npm dependencies
+          command: |
+            npm install --save
+      - run:
+          name: Run Unit Tests
+          command: |
+            ./node_modules/mocha/bin/mocha test/ --reporter mochawesome --reporter-options reportDir=test-results,reportFilename=test-results
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: test-results
+  build_docker_image:
+    docker:
+      - image: circleci/node:12
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: false
+      - run:
+          name: Build Docker image
+          command: |
+            export TAG=0.2.<< pipeline.number >>
+            export IMAGE_NAME=$CIRCLE_PROJECT_REPONAME
+            docker build -t $DOCKER_LOGIN/$IMAGE_NAME -t $DOCKER_LOGIN/$IMAGE_NAME:$TAG .
+            echo $DOCKER_PWD | docker login -u $DOCKER_LOGIN --password-stdin
+            docker push $DOCKER_LOGIN/$IMAGE_NAME
+  gke_create_cluster:
+    docker:
+      - image: ariv3ra/terraform-gcp:latest
+    environment:
+      CLOUDSDK_CORE_PROJECT: cicd-workshops
+    steps:
+      - checkout
+      - run:
+          name: Create GKE Cluster
+          command: |
+            echo $TF_CLOUD_TOKEN | base64 -d > $HOME/.terraformrc
+            echo $GOOGLE_CLOUD_KEYS | base64 -d > $HOME/gcloud_keys
+            gcloud auth activate-service-account --key-file ${HOME}/gcloud_keys
+            cd part03/iac_gke_cluster/
+            terraform init
+            terraform plan -var credentials=$HOME/gcloud_keys -out=plan.txt
+            terraform apply plan.txt
+  gke_deploy_app:
+    docker:
+      - image: ariv3ra/terraform-gcp:latest
+    environment:
+      CLOUDSDK_CORE_PROJECT: cicd-workshops
+    steps:
+      - checkout
+      - run:
+          name: Deploy App to GKE
+          command: |
+            export CLUSTER_NAME="cicd-workshops"
+            export TAG=0.2.<< pipeline.number >>
+            export DOCKER_IMAGE="docker-image=${DOCKER_LOGIN}/${CIRCLE_PROJECT_REPONAME}:$TAG"
+            echo $TF_CLOUD_TOKEN | base64 -d > $HOME/.terraformrc
+            echo $GOOGLE_CLOUD_KEYS | base64 -d > $HOME/gcloud_keys
+            gcloud auth activate-service-account --key-file ${HOME}/gcloud_keys
+            gcloud container clusters get-credentials $CLUSTER_NAME --zone="us-east1-d"
+            cd part03/iac_kubernetes_app
+            terraform init
+            terraform plan -var $DOCKER_IMAGE -out=plan.txt
+            terraform apply plan.txt
+            export ENDPOINT="$(terraform output endpoint)"
+            mkdir -p /tmp/gke/
+            echo 'export ENDPOINT='${ENDPOINT} > /tmp/gke/gke-endpoint
+      - persist_to_workspace:
+          root: /tmp/gke
           paths:
-            - ~/.gradle
-          key: v1-dependencies-{{ checksum "build.gradle" }}
-
-      # run tests!
-      - run: gradle test
+            - "*"
+  gke_destroy_cluster:
+    docker:
+      - image: ariv3ra/terraform-gcp:latest
+    environment:
+      CLOUDSDK_CORE_PROJECT: cicd-workshops
+    steps:
+      - checkout
+      - run:
+          name: Destroy GKE Cluster
+          command: |
+            export CLUSTER_NAME="cicd-workshops"
+            export TAG=0.2.<< pipeline.number >>
+            export DOCKER_IMAGE="docker-image=${DOCKER_LOGIN}/${CIRCLE_PROJECT_REPONAME}:$TAG"
+            echo $TF_CLOUD_TOKEN | base64 -d > $HOME/.terraformrc
+            echo $GOOGLE_CLOUD_KEYS | base64 -d > $HOME/gcloud_keys
+            gcloud auth activate-service-account --key-file ${HOME}/gcloud_keys
+            cd part03/iac_kubernetes_app
+            terraform init
+            gcloud container clusters get-credentials $CLUSTER_NAME --zone="us-east1-d"
+            terraform destroy -var $DOCKER_IMAGE --auto-approve
+            cd ../iac_gke_cluster/
+            terraform init
+            terraform destroy -var credentials=$HOME/gcloud_keys --auto-approve
+workflows:
+  build_test:
+    jobs:
+      - run_tests
