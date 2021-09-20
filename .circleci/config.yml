@@ -9,7 +9,6 @@ jobs:
           name: Install npm dependencies
           command: |
             npm install --save
-            which mocha
       - run:
           name: Run Unit Tests
           command: |
