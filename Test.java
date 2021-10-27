@@ -55,6 +55,11 @@ public class Test {
 		//regExTest();
 	}
 	
+	private String readFileTwo(String file) throws IOException {
+		String s = "wp1 one";		
+	    	return s;
+	}	
+	
 	private String readFile(String file) throws IOException {
 		URL url = getClass().getResource(file);
 
